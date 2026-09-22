@@ -19,22 +19,29 @@ real response captured from the provider):
               "market_state": "open",
               "status": "ok",
               "last_candle_timestamp": "...",
-              "candle_count": ...,
+              "updated_at": "...",
+              "websocket_connected": true,
+              "reconnect_count": ...,
               "gap_recoveries": ...,
               "rejected_count": ...,
-              "candles": [
+              "candles_l1": [
                   {"timestamp": "...", "open": ..., "high": ..., "low": ...,
                    "close": ..., "volume": ..., "bid": null, "ask": null}
-              ]
+              ],
+              "m1_valid": true
           }
       }
     }
 
 ``payload["symbols"]`` is the authoritative instrument universe — nothing
-outside it is ever treated as market data. ``bid``/``ask`` are read from
-neither the payload nor stored on :class:`~psygrid.models.Candle`: the
-OHLCV-only strategy has no use for them, and their being ``null`` is never
-a reason to reject an otherwise-valid candle.
+outside it is ever treated as market data. Each symbol's authoritative M1
+candle array is at ``entry["candles_l1"]`` — NOT ``entry["candles"]``; an
+earlier version of this adapter looked for ``"candles"``, which does not
+exist in the real payload, and silently treated every symbol as having
+zero candles as a result. ``bid``/``ask`` are read from neither the
+payload nor stored on :class:`~psygrid.models.Candle`: the OHLCV-only
+strategy has no use for them, and their being ``null`` is never a reason
+to reject an otherwise-valid candle.
 
 NEVER fabricates data: any candle that fails validation is dropped and
 recorded as a data-quality issue, never guessed or interpolated. Never
@@ -279,9 +286,12 @@ def parse_payload(
             rejected_count=entry.get("rejected_count"),
         )
 
-        raw_candles = entry.get("candles")
+        # The live provider's authoritative M1 array is "candles_l1", NOT
+        # "candles" — do not fall back to "candles" here; a symbol simply
+        # has no usable data if "candles_l1" is absent/invalid, full stop.
+        raw_candles = entry.get("candles_l1")
         if not isinstance(raw_candles, list):
-            rejected_symbols[symbol] = "missing or invalid 'candles' array"
+            rejected_symbols[symbol] = "missing or invalid 'candles_l1' array"
             continue
 
         candles: List[Candle] = []
@@ -297,7 +307,7 @@ def parse_payload(
 
         if not candles:
             rejected_symbols[symbol] = (
-                "candles array is empty"
+                "candles_l1 array is empty"
                 if not raw_candles
                 else f"no valid candles parsed ({bad} of {len(raw_candles)} rejected)"
             )

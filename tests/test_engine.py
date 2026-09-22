@@ -197,7 +197,7 @@ def test_engine_names_rejected_symbols_and_reflects_them_in_status(tmp_path):
     payload = live_payload_json(
         {"XAUUSD": good, "EURUSD": weak},
         server_time=good[-1].ts,
-        extra_symbol_overrides={"EURUSD": {"candles": []}},
+        extra_symbol_overrides={"EURUSD": {"candles_l1": []}},
     )
     config = Config(min_quality_score=1.0, history_min_candles=200, expected_instrument_count=2)
     engine, persistence, sent = _make_engine(tmp_path, lambda: payload, now_holder, config=config)

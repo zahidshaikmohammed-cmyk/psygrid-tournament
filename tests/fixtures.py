@@ -116,7 +116,11 @@ def make_sweep_series(instrument: str, n: int = 220, base: float = 100.0, start_
 def live_symbol_block(candles: List[Candle], market_state: str = "open", status: str = "ok") -> dict:
     """One entry of payload["symbols"][SYMBOL], matching the confirmed live
     RealMarketAPI schema exactly (including bid/ask, always null — the
-    OHLCV-only strategy never reads them)."""
+    OHLCV-only strategy never reads them).
+
+    The authoritative M1 candle array is at "candles_l1" — NOT "candles",
+    which does not exist in the real payload.
+    """
     return {
         "symbol": candles[0].instrument if candles else "",
         "market_state": market_state,
@@ -125,7 +129,7 @@ def live_symbol_block(candles: List[Candle], market_state: str = "open", status:
         "candle_count": len(candles),
         "gap_recoveries": 0,
         "rejected_count": 0,
-        "candles": [
+        "candles_l1": [
             {
                 "timestamp": c.ts,
                 "open": c.open,
