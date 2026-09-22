@@ -1,0 +1,72 @@
+name: CI
+
+# Secrets note: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be configured
+# under this repository's Settings -> Secrets and variables -> Actions.
+# They are only ever exposed to the `telegram-connectivity` job below, only
+# as environment variables (never as command-line arguments, which would
+# risk appearing in process listings), and that job never triggers on
+# `pull_request` — forked-repo PRs are never granted access to secrets by
+# GitHub, and this avoids a confusing failure on external contributions.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q
+
+  telegram-connectivity:
+    name: Telegram connectivity check
+    runs-on: ubuntu-latest
+    needs: test
+    # Never runs on pull_request: forked PRs don't receive repository
+    # secrets, and this job would otherwise fail with a misleading
+    # "missing configuration" error that has nothing to do with the PR.
+    if: github.event_name != 'pull_request'
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Mask secrets defensively
+        # GitHub Actions already masks any log output that exactly matches
+        # a registered secret value; this is belt-and-suspenders in case a
+        # value is ever partially transformed before being printed.
+        run: |
+          echo "::add-mask::${TELEGRAM_BOT_TOKEN}"
+          echo "::add-mask::${TELEGRAM_CHAT_ID}"
+
+      - name: Verify Telegram secrets are configured and valid
+        # Fails clearly (non-zero exit) if either secret is missing or
+        # invalid. Sends no message — safe to run on every push. The
+        # engine's TelegramClient sanitizes the bot token out of every
+        # error string before it is ever printed, so this step's output
+        # never reveals either secret's value.
+        run: python main.py --check-telegram

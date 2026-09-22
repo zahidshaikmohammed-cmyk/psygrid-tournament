@@ -51,6 +51,10 @@ psygrid-tournament/
 ├── main.py                      CLI entry point
 ├── requirements.txt
 ├── .env.example                 every configurable env var, no secrets
+├── .gitignore                   keeps .env, *.sqlite3, caches out of git
+├── .github/
+│   └── workflows/
+│       └── ci.yml                pytest job + Telegram connectivity job
 ├── psygrid/
 │   ├── config.py                env-var driven configuration + validation
 │   ├── api_client.py            RealMarketAPI fetch + defensive parsing
@@ -76,7 +80,8 @@ psygrid-tournament/
 │   └── demo_data.py               offline synthetic feed for --demo
 └── tests/
     ├── fixtures.py                deterministic synthetic candle builders
-    └── test_*.py                  ~83 tests across every module
+    ├── test_secrets.py             secret loading, fail-safe errors, redaction
+    └── test_*.py                   ~96 tests across every module
 ```
 
 ## Configuring environment variables
@@ -121,6 +126,52 @@ then starts the continuous scan loop with a live terminal status display,
 running a tournament on every 30-minute boundary until you stop it with
 Ctrl-C.
 
+## Telegram secrets: how they're wired
+
+- **Reading**: `psygrid/config.py` reads `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID` exclusively via `os.getenv(...)`. Neither has a
+  non-empty default and neither is ever hard-coded anywhere in this
+  codebase.
+- **Fail-safe on missing secrets**: `Config.require_telegram_credentials()`
+  raises a `ConfigError` that names exactly which variable(s) are missing —
+  never a bare `KeyError`/`TypeError`/`None`-concatenation crash, and never
+  a value. It's used by `python main.py --check-telegram` (see below). The
+  main engine (`python main.py`) still starts and runs without Telegram
+  configured — alerts are simply disabled and it says so — since the
+  10-instrument analysis itself doesn't depend on Telegram.
+- **Never logged**: `TelegramClient._sanitize()` strips the bot token out of
+  every error string before it can reach a log line, a returned
+  `SendResult.error`, or a printed message — this matters because HTTP
+  client libraries often embed the full request URL (token included) in
+  their own connection-error text. `check_connectivity()` (see below)
+  never includes either secret's value in its result, success or failure.
+- **Local development**: copy `.env.example` to `.env` (already covered
+  above); `.env` is listed in `.gitignore` and must never be committed.
+- **GitHub Actions**: add both secrets under this repository's *Settings →
+  Secrets and variables → Actions*, named exactly `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID`. `.github/workflows/ci.yml`'s `telegram-connectivity`
+  job maps them to environment variables via `${{ secrets.* }}` — never as
+  command-line arguments — and only for that job (least privilege). That
+  job intentionally never runs on `pull_request` events, since GitHub does
+  not expose secrets to forked-repo PRs and the job would otherwise fail
+  with a misleading error unrelated to the PR's actual contents.
+
+### Connectivity test
+
+```bash
+python main.py --check-telegram          # live: needs both secrets set
+python main.py --demo --check-telegram   # offline: no network, no secrets
+```
+
+This is deliberately **not** the same as sending a real tournament report:
+it calls Telegram's read-only `getMe` (proves the bot token is valid) and
+`getChat` (proves the chat id is valid and reachable by the bot) — so it's
+safe to run on every push/CI run without spamming the chat. It exits `1`
+with a `[CONFIG ERROR]` line if either secret is absent, exits `1` with a
+sanitized failure reason if the secrets are present but invalid/unreachable,
+and exits `0` on success. It never prints either secret's value in any of
+these paths (see `tests/test_secrets.py`).
+
 ## Testing
 
 ```bash
@@ -128,19 +179,21 @@ pip install -r requirements.txt
 python -m pytest tests/ -q
 ```
 
-83 deterministic tests cover: API parsing (including malformed/partial
+96 deterministic tests cover: API parsing (including malformed/partial
 payloads), stale/missing/misaligned candle data, M5/M15/M30/H1 aggregation
 correctness (including that no bucket is ever fabricated), structure/setup
 detection, hard-gate disqualification, candidate ranking and deterministic
 tie-breaking, the NO-TRADE path, tournament scheduler synchronization
 (exactly one tournament per 30-minute boundary, including under restart
 recovery), Telegram message formatting and failure handling, SQLite
-persistence, and forward outcome tracking. No randomness is used anywhere
-in the suite — every fixture is an explicit, reproducible formula.
+persistence, forward outcome tracking, and secret handling (env-var
+loading, fail-safe missing-credential errors, and that a bot token can
+never leak into a log/error/CLI-output string). No randomness is used
+anywhere in the suite — every fixture is an explicit, reproducible formula.
 
 ## Verification performed before calling this done
 
-1. `python -m pytest tests/ -q` → **83 passed**.
+1. `python -m pytest tests/ -q` → **96 passed**.
 2. `python main.py --demo --once` → all 10 synthetic instruments analyzed
    in parallel, a full tournament ran, and exactly one Telegram message was
    generated (verified with `PSYGRID_MIN_QUALITY_SCORE` at both its default

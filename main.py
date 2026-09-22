@@ -18,7 +18,7 @@ import time
 
 from psygrid import demo_data
 from psygrid.api_client import ApiError, RealMarketApiClient
-from psygrid.config import load_config
+from psygrid.config import ConfigError, load_config
 from psygrid.engine import Engine
 from psygrid.persistence import Persistence
 from psygrid.telegram_client import TelegramClient
@@ -46,12 +46,34 @@ def test_telegram(telegram_client: TelegramClient, configured: bool) -> bool:
             "missing) — tournament reports will not be sent."
         )
         return False
-    result = telegram_client.send_message("PSYGRID Tournament Engine: startup connectivity check OK.")
+    # Uses check_connectivity() (getMe + getChat) rather than send_message()
+    # so a routine engine restart never spams the chat — it only proves both
+    # secrets are valid and wired up correctly. Never prints the token or
+    # chat id; a failure message is pre-sanitized by TelegramClient.
+    result = telegram_client.check_connectivity()
     if result.ok:
-        print("[STARTUP] Telegram test: OK.")
+        print("[STARTUP] Telegram test: OK (bot token and chat id verified).")
     else:
         print(f"[STARTUP] Telegram test FAILED: {result.error}")
     return result.ok
+
+
+def check_telegram_only(config, demo: bool) -> int:
+    """Dedicated, non-spammy connectivity check for CI / manual verification.
+
+    Fails safely and clearly (no engine, no SQLite, no RealMarketAPI touched)
+    if either secret is missing, and never prints a credential value.
+    """
+    try:
+        if not demo:
+            config.require_telegram_credentials()
+    except ConfigError as exc:
+        print(f"[CONFIG ERROR] {exc}")
+        return 1
+
+    _, telegram_client, _, configured = build_clients(config, demo)
+    ok = test_telegram(telegram_client, configured or demo)
+    return 0 if ok else 1
 
 
 def build_clients(config, demo: bool):
@@ -65,10 +87,14 @@ def build_clients(config, demo: bool):
             sent_messages.append(payload["text"])
             return {"ok": True, "result": {"message_id": len(sent_messages)}}
 
+        def mock_get(url):
+            return {"ok": True, "result": {}}
+
         telegram_client = TelegramClient(
             config.telegram_bot_token or "demo-token",
             config.telegram_chat_id or "demo-chat",
             post_fn=mock_post,
+            get_fn=mock_get,
         )
         return api_client, telegram_client, sent_messages, True
 
@@ -88,6 +114,15 @@ def main(argv=None) -> int:
         "--once", action="store_true", help="Run a single scan + tournament cycle, print the result, then exit."
     )
     parser.add_argument("--db-path", default=None, help="Override PSYGRID_DB_PATH for this run.")
+    parser.add_argument(
+        "--check-telegram",
+        action="store_true",
+        help=(
+            "Verify TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are present and valid, then exit. "
+            "Sends no message (safe to run in CI on every push). Fails with a clear "
+            "[CONFIG ERROR] if either secret is missing; never prints their values."
+        ),
+    )
     args = parser.parse_args(argv)
 
     print(BANNER)
@@ -97,6 +132,9 @@ def main(argv=None) -> int:
     config = load_config()
     if args.db_path:
         config.db_path = args.db_path
+
+    if args.check_telegram:
+        return check_telegram_only(config, args.demo)
 
     problems = config.validate()
     if problems:

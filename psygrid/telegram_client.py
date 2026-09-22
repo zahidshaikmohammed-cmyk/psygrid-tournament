@@ -33,11 +33,37 @@ class SendResult:
     error: Optional[str] = None
 
 
+TOKEN_REDACTED = "***REDACTED***"
+
+
 class TelegramClient:
-    def __init__(self, bot_token: str, chat_id: str, post_fn: Optional[Callable[[str, dict], dict]] = None):
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        post_fn: Optional[Callable[[str, dict], dict]] = None,
+        get_fn: Optional[Callable[[str], dict]] = None,
+    ):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self._post_fn = post_fn
+        self._get_fn = get_fn
+
+    # -- secret hygiene ---------------------------------------------------------
+
+    def _sanitize(self, text: str) -> str:
+        """Strip the bot token out of any string before it can reach a log,
+        an exception message, or a returned error — e.g. the requests
+        library embeds the full request URL (token included) in its own
+        connection-error messages."""
+        if self.bot_token and self.bot_token in text:
+            text = text.replace(self.bot_token, TOKEN_REDACTED)
+        return text
+
+    def _api_url(self, method: str) -> str:
+        return f"https://api.telegram.org/bot{self.bot_token}/{method}"
+
+    # -- sending ------------------------------------------------------------------
 
     def _default_post(self, url: str, payload: dict) -> dict:
         if requests is None:
@@ -51,7 +77,7 @@ class TelegramClient:
     def send_message(self, text: str) -> SendResult:
         if not self.bot_token or not self.chat_id:
             return SendResult(ok=False, error="Telegram credentials are not configured.")
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        url = self._api_url("sendMessage")
         payload = {"chat_id": self.chat_id, "text": text}
         try:
             if self._post_fn is not None:
@@ -60,7 +86,45 @@ class TelegramClient:
                 self._default_post(url, payload)
             return SendResult(ok=True)
         except Exception as exc:  # never let a Telegram failure crash the engine
-            return SendResult(ok=False, error=str(exc))
+            return SendResult(ok=False, error=self._sanitize(str(exc)))
+
+    # -- connectivity check --------------------------------------------------------
+
+    def _default_get(self, url: str) -> dict:
+        if requests is None:
+            raise TelegramError("The 'requests' package is not installed.")
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if not resp.ok or not data.get("ok", False):
+            raise TelegramError(f"Telegram API error: HTTP {resp.status_code} {data}")
+        return data
+
+    def _get(self, url: str) -> dict:
+        if self._get_fn is not None:
+            return self._get_fn(url)
+        return self._default_get(url)
+
+    def check_connectivity(self) -> SendResult:
+        """Verify both secrets are actually wired up correctly, WITHOUT
+        sending a real message to the chat (safe to run repeatedly, e.g. on
+        every CI run, with no spam).
+
+        Two calls, both against read-only Telegram Bot API methods:
+          1. ``getMe``   — proves TELEGRAM_BOT_TOKEN is valid.
+          2. ``getChat`` — proves TELEGRAM_CHAT_ID is valid and reachable by
+             this bot.
+
+        The token is never included in the returned result, on success or
+        failure — only a sanitized message, if any.
+        """
+        if not self.bot_token or not self.chat_id:
+            return SendResult(ok=False, error="Telegram credentials are not configured.")
+        try:
+            self._get(self._api_url("getMe"))
+            self._get(self._api_url("getChat") + f"?chat_id={self.chat_id}")
+            return SendResult(ok=True)
+        except Exception as exc:
+            return SendResult(ok=False, error=self._sanitize(str(exc)))
 
 
 # ---------------------------------------------------------------------------

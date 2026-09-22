@@ -22,8 +22,12 @@ DEFAULT_API_URL = "http://140.245.226.102:8080/public/m1-live.json"
 class Config:
     # --- external endpoints -------------------------------------------------
     api_url: str = field(default_factory=lambda: os.environ.get("REALMARKET_API_URL", DEFAULT_API_URL))
-    telegram_bot_token: str = field(default_factory=lambda: os.environ.get("TELEGRAM_BOT_TOKEN", ""))
-    telegram_chat_id: str = field(default_factory=lambda: os.environ.get("TELEGRAM_CHAT_ID", ""))
+    # Telegram credentials: read exclusively via os.getenv(), never hard-coded,
+    # never given a non-empty default. Absence is a valid, detectable state
+    # (see require_telegram_credentials()) rather than a silent empty string
+    # standing in for a real secret.
+    telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
 
     # --- storage --------------------------------------------------------------
     db_path: str = field(default_factory=lambda: os.environ.get("PSYGRID_DB_PATH", "psygrid.sqlite3"))
@@ -110,6 +114,29 @@ class Config:
 
     def telegram_configured(self) -> bool:
         return bool(self.telegram_bot_token) and bool(self.telegram_chat_id)
+
+    def require_telegram_credentials(self) -> None:
+        """Fail fast and clearly when Telegram secrets are not wired up.
+
+        Raises :class:`ConfigError` naming exactly which environment
+        variable(s) are missing. Never includes credential values in the
+        message — there is nothing to redact when the whole point is that
+        the value is absent, but this also guards against accidentally
+        interpolating a *stray* value from elsewhere.
+        """
+        missing = []
+        if not self.telegram_bot_token:
+            missing.append("TELEGRAM_BOT_TOKEN")
+        if not self.telegram_chat_id:
+            missing.append("TELEGRAM_CHAT_ID")
+        if missing:
+            raise ConfigError(
+                "Missing required Telegram configuration: "
+                + ", ".join(missing)
+                + ". Set these as environment variables (locally via .env / "
+                "your shell, or in CI via GitHub Actions repository secrets) "
+                "before running a Telegram connectivity check."
+            )
 
 
 def load_config() -> Config:
