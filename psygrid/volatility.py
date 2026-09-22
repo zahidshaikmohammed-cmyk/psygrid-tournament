@@ -1,4 +1,13 @@
-"""Volatility analysis: ATR, relative volatility, expansion/compression, abnormal spikes."""
+"""Volatility analysis: ATR, relative volatility, expansion/compression, abnormal spikes.
+
+DERIVED FEATURE — RealMarketAPI supplies raw OHLCV only, no ATR or any
+other volatility measure. ATR here is computed locally from true range
+(itself derived purely from high/low/close), the one classic "indicator"
+this engine uses — kept because stop-sizing and R:R (execution.py) are
+structurally meaningless without a volatility measure, not because ATR is
+conventional. It is deliberately NOT smoothed with an EMA/RSI/MACD-style
+indicator stack.
+"""
 
 from __future__ import annotations
 

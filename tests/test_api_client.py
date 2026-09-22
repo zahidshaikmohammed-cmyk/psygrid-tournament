@@ -107,3 +107,54 @@ def test_client_wraps_fetch_exceptions_as_api_error():
     client = RealMarketApiClient("http://example.invalid", fetch_fn=boom)
     with pytest.raises(ApiError):
         client.fetch()
+
+
+def test_provider_indicator_fields_are_parsed_out_and_never_stored():
+    # RealMarketAPI is contractually OHLCV + timestamp only, but even if a
+    # payload included indicator-looking fields (rsi/ema/macd/atr/vwap), the
+    # parser must only ever read the fixed OHLCV keys it knows about and
+    # silently drop everything else — never store, forward, or let an
+    # indicator value ride along as if it were raw market data.
+    raw = json.dumps(
+        {
+            "instruments": {
+                "XAUUSD": {
+                    "candles": [
+                        {
+                            "time": BASE_TS,
+                            "open": 2400.0,
+                            "high": 2401.0,
+                            "low": 2399.0,
+                            "close": 2400.5,
+                            "volume": 10.0,
+                            "rsi": 71.4,
+                            "ema_20": 2398.2,
+                            "macd": 1.23,
+                            "atr": 3.5,
+                            "vwap": 2400.1,
+                            "bollinger_upper": 2405.0,
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    result = parse_payload(raw)
+    assert result.ok
+    candle = result.instruments["XAUUSD"][0]
+    # Candle is a fixed-field dataclass — there is no attribute an
+    # indicator value could have been smuggled into.
+    assert set(vars(candle).keys()) == {
+        "instrument",
+        "timeframe",
+        "ts",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "synthetic_from_m1",
+    }
+    assert candle.open == 2400.0
+    assert candle.close == 2400.5
+    assert candle.volume == 10.0

@@ -1,4 +1,11 @@
-"""Execution-quality analysis: R:R, distance to invalidation, slippage sensitivity."""
+"""Execution-quality analysis: R:R, distance to invalidation, slippage sensitivity.
+
+DERIVED FEATURE — built entirely from a candidate Setup's own price levels
+(themselves derived from raw OHLCV) plus the locally-derived ATR. No
+provider-side risk, spread, or liquidity-depth data exists to consult;
+`slippage_sensitivity` is explicitly reported "UNKNOWN" rather than guessed
+whenever a real spread estimate is not supplied.
+"""
 
 from __future__ import annotations
 

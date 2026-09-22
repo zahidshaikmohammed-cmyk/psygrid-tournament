@@ -44,6 +44,67 @@ moves once at least `PSYGRID_HISTORICAL_MIN_SAMPLE` real resolved outcomes
 exist for that instrument/setup/regime combination. Nothing is assumed
 profitable up front.
 
+## Raw data vs. engine-derived features (and indicator policy)
+
+**RealMarketAPI's contract is OHLCV + timestamp only.** It provides no
+RSI, EMA, MACD, ATR, VWAP, Bollinger Bands, or any other indicator, and
+`psygrid/api_client.py` reads exactly six fields per candle (open/high/
+low/close/volume/time — see `OPEN_KEYS`/`HIGH_KEYS`/`LOW_KEYS`/
+`CLOSE_KEYS`/`VOLUME_KEYS`/`TIME_KEYS`); anything else present in a payload
+(an indicator field a future provider version might add) is parsed out and
+discarded, never stored on a `Candle` or used anywhere downstream — `Candle`
+is a fixed-field dataclass with no slot an extra value could ride along in
+(verified in `tests/test_api_client.py`).
+
+Two clearly separated categories exist everywhere in this codebase:
+
+- **RAW** — genuine M1 OHLCV candles as received from RealMarketAPI
+  (`Candle.synthetic_from_m1 == False`). This is the only authoritative
+  market input; nothing overrides or second-guesses it.
+- **DERIVED** — everything else, computed locally, always from raw OHLCV
+  (directly, or from other derived values that trace back to it):
+  - M5/M15/M30/H1 candles (`psygrid/timeframes.py`,
+    `Candle.synthetic_from_m1 == True`) — never trusted from the provider
+    even if it were to start supplying them.
+  - Structure, momentum, volatility, liquidity, price-behaviour, setup,
+    execution, and time-behaviour features (`psygrid/structure.py`,
+    `momentum.py`, `volatility.py`, `liquidity.py`, `price_behavior.py`,
+    `setups.py`, `execution.py`, `time_behavior.py`) — each module's
+    docstring is tagged `DERIVED FEATURE` and states exactly what raw
+    inputs it's computed from.
+
+**Indicators are the minority, not the default.** The engine is built
+structure/momentum/volatility/liquidity-first, per the spec's own
+philosophy — it does not reach for a conventional indicator stack. The one
+classic "indicator" used anywhere is **ATR** (Average True Range,
+`psygrid/volatility.py`), computed locally from raw high/low/close, because
+stop-sizing and R:R (`execution.py`) are structurally meaningless without
+some volatility measure — it's there because it's load-bearing, not because
+it's conventional. Momentum is measured as plain rate-of-change on raw
+closes rather than RSI/EMA/MACD, explicitly to keep it auditable
+(`momentum.py`'s own docstring explains this choice).
+
+**Predictive value is tested, not assumed**, for the same reason as any
+setup: every candidate a tournament selects is watched forward and its
+real 1/5/10/15/30-minute outcomes are recorded (see *Historical validation*
+above). The "historical conditional quality" score component is how ATR-
+and momentum-informed setups actually get judged — by realized outcome, not
+by indicator folklore — and it stays neutral until enough real samples
+exist.
+
+**History is preserved for every feature's widest lookback.**
+`PSYGRID_HISTORY_MIN_CANDLES` (default 200) is validated at startup
+(`Config.validate()`) to never fall below `MIN_RELIABLE_HISTORY_CANDLES`
+(120 — `psygrid/structure.py`'s swing-detection lookback, the widest window
+any feature needs), and `PSYGRID_MAX_ROLLING_CANDLES` (default 1600, at
+least the ~1,500 M1 candles the endpoint provides) is validated to never
+fall below it either — so no feature can silently be starved of history by
+a misconfigured environment variable.
+
+See `tests/test_indicator_calculations.py` for hand-computed-value tests
+of every derived feature (ATR/true range, momentum ROC, swing detection,
+timeframe aggregation, liquidity extremes) against known OHLCV fixtures.
+
 ## File tree
 
 ```
@@ -81,7 +142,8 @@ psygrid-tournament/
 └── tests/
     ├── fixtures.py                deterministic synthetic candle builders
     ├── test_secrets.py             secret loading, fail-safe errors, redaction
-    └── test_*.py                   ~96 tests across every module
+    ├── test_indicator_calculations.py  hand-computed ATR/ROC/swings/aggregation
+    └── test_*.py                   ~119 tests across every module
 ```
 
 ## Configuring environment variables
@@ -179,7 +241,7 @@ pip install -r requirements.txt
 python -m pytest tests/ -q
 ```
 
-96 deterministic tests cover: API parsing (including malformed/partial
+119 deterministic tests cover: API parsing (including malformed/partial
 payloads), stale/missing/misaligned candle data, M5/M15/M30/H1 aggregation
 correctness (including that no bucket is ever fabricated), structure/setup
 detection, hard-gate disqualification, candidate ranking and deterministic
@@ -193,7 +255,7 @@ anywhere in the suite — every fixture is an explicit, reproducible formula.
 
 ## Verification performed before calling this done
 
-1. `python -m pytest tests/ -q` → **96 passed**.
+1. `python -m pytest tests/ -q` → **119 passed**.
 2. `python main.py --demo --once` → all 10 synthetic instruments analyzed
    in parallel, a full tournament ran, and exactly one Telegram message was
    generated (verified with `PSYGRID_MIN_QUALITY_SCORE` at both its default

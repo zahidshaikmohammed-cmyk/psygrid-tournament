@@ -1,8 +1,10 @@
 """Momentum analysis: direction, acceleration, persistence, exhaustion.
 
-Uses only price data already present in the candle series (no RSI/EMA —
+DERIVED FEATURE — RealMarketAPI supplies no momentum indicator of any kind.
+Uses only price data already present in the raw candle series (no RSI/EMA —
 added per-instrument indicator libraries are explicitly avoided; instead we
-measure rate-of-change directly, which is simpler and equally auditable).
+measure rate-of-change directly from raw closes, which is simpler and
+equally auditable).
 """
 
 from __future__ import annotations

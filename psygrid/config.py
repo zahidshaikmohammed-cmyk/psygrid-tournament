@@ -17,6 +17,13 @@ class ConfigError(Exception):
 
 DEFAULT_API_URL = "http://140.245.226.102:8080/public/m1-live.json"
 
+# The largest single lookback window any locally-derived feature needs on
+# raw M1 data (psygrid/structure.py's default swing lookback is currently
+# the widest, at 120 bars). PSYGRID_HISTORY_MIN_CANDLES must stay at or
+# above this so every feature — structure, momentum, volatility, liquidity —
+# can always be computed reliably rather than silently starved of history.
+MIN_RELIABLE_HISTORY_CANDLES = 120
+
 
 @dataclass
 class Config:
@@ -110,6 +117,17 @@ class Config:
             problems.append("PSYGRID_MIN_QUALITY_SCORE must be in (0, 100].")
         if self.min_rr <= 0:
             problems.append("PSYGRID_MIN_RR must be positive.")
+        if self.history_min_candles < MIN_RELIABLE_HISTORY_CANDLES:
+            problems.append(
+                f"PSYGRID_HISTORY_MIN_CANDLES ({self.history_min_candles}) is below "
+                f"{MIN_RELIABLE_HISTORY_CANDLES}, the widest lookback any locally-derived "
+                "feature needs — lowering it risks features silently starved of history."
+            )
+        if self.max_rolling_candles < self.history_min_candles:
+            problems.append(
+                "PSYGRID_MAX_ROLLING_CANDLES must be >= PSYGRID_HISTORY_MIN_CANDLES "
+                f"(got {self.max_rolling_candles} < {self.history_min_candles})."
+            )
         return problems
 
     def telegram_configured(self) -> bool:

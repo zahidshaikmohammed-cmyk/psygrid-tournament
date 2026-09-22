@@ -1,5 +1,9 @@
 """Price-behaviour classification: impulse, pullback, continuation, reversal,
 range behaviour, breakout / failed breakout.
+
+DERIVED FEATURE — a pure re-reading of the locally-derived structure and
+volatility states plus raw OHLC body/wick geometry; no provider indicator
+or additional data source is consulted.
 """
 
 from __future__ import annotations

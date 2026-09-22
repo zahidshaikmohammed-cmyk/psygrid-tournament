@@ -1,5 +1,10 @@
 """Market structure analysis: swings, HH/HL/LH/LL, breaks, consolidation.
 
+DERIVED FEATURE — RealMarketAPI supplies none of this. Every value here is
+computed locally, purely from the raw OHLCV candles already ingested (see
+`psygrid/candle_store.py`); nothing is read from or assumed to exist in the
+provider payload.
+
 One deterministic fractal-swing methodology is applied identically to every
 instrument and timeframe — no per-instrument special casing.
 """

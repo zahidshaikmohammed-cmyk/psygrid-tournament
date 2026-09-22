@@ -1,4 +1,9 @@
-"""Liquidity analysis: recent extremes, equal highs/lows, sweeps, rejection."""
+"""Liquidity analysis: recent extremes, equal highs/lows, sweeps, rejection.
+
+DERIVED FEATURE — computed locally from raw OHLCV highs/lows only (plus the
+locally-derived ATR passed in as a tolerance scale); RealMarketAPI supplies
+no liquidity, order-book, or volume-profile data of any kind.
+"""
 
 from __future__ import annotations
 
