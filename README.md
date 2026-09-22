@@ -142,20 +142,34 @@ psygrid-tournament/
 └── tests/
     ├── fixtures.py                deterministic synthetic candle builders
     ├── test_secrets.py             secret loading, fail-safe errors, redaction
+    ├── test_dotenv.py               .env loading, shell/CI precedence
     ├── test_indicator_calculations.py  hand-computed ATR/ROC/swings/aggregation
-    └── test_*.py                   ~119 tests across every module
+    └── test_*.py                   ~128 tests across every module
 ```
 
 ## Configuring environment variables
 
-Nothing is hard-coded. Copy `.env.example` and fill in credentials, or
-export directly:
+Nothing is hard-coded. For local development, copy `.env.example` to `.env`
+and fill in credentials — `psygrid/config.py` loads it automatically via
+[python-dotenv](https://pypi.org/project/python-dotenv/) the moment it's
+imported, so no `export`/`source` step is required:
 
 ```bash
 cp .env.example .env
-# edit .env, then:
-export $(grep -v '^#' .env | xargs)
+# edit .env with real values, then just run:
+python main.py
+```
 
+`.env` is a local-dev convenience only. It **never** overrides a variable
+already present in the environment (`load_dotenv(..., override=False)`),
+so anything set by your shell, or — in CI — by GitHub Actions mapping
+`secrets.*` to `env:`, always takes precedence; `.env` only fills in gaps.
+`.env` is listed in `.gitignore` and must never be committed. See
+`tests/test_dotenv.py` for tests proving this precedence.
+
+You can still export variables directly instead of using `.env`:
+
+```bash
 # minimum required for live Telegram alerts:
 export TELEGRAM_BOT_TOKEN="123456:ABC-your-bot-token"
 export TELEGRAM_CHAT_ID="123456789"
@@ -241,7 +255,7 @@ pip install -r requirements.txt
 python -m pytest tests/ -q
 ```
 
-119 deterministic tests cover: API parsing (including malformed/partial
+128 deterministic tests cover: API parsing (including malformed/partial
 payloads), stale/missing/misaligned candle data, M5/M15/M30/H1 aggregation
 correctness (including that no bucket is ever fabricated), structure/setup
 detection, hard-gate disqualification, candidate ranking and deterministic
@@ -255,7 +269,7 @@ anywhere in the suite — every fixture is an explicit, reproducible formula.
 
 ## Verification performed before calling this done
 
-1. `python -m pytest tests/ -q` → **119 passed**.
+1. `python -m pytest tests/ -q` → **128 passed**.
 2. `python main.py --demo --once` → all 10 synthetic instruments analyzed
    in parallel, a full tournament ran, and exactly one Telegram message was
    generated (verified with `PSYGRID_MIN_QUALITY_SCORE` at both its default

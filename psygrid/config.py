@@ -3,12 +3,28 @@
 Everything that should differ between demo/live or between deployments is
 read from environment variables. Nothing here is a secret default — Telegram
 and API credentials are NEVER hard-coded.
+
+Local development note: `.env` (see `.env.example`) is loaded once, at
+import time, via `load_env_file()` below — purely as a convenience so a
+developer doesn't have to `export` a dozen variables by hand. It NEVER
+overrides a variable the shell/CI already set (`override=False`), so the
+existing GitHub Actions behavior — secrets mapped straight to environment
+variables in the workflow — is completely unaffected; `.env` only ever
+fills in gaps for local runs. `.env` is never printed, logged, or read back
+out anywhere in this module beyond populating `os.environ`.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - python-dotenv is a declared dependency
+    load_dotenv = None
 
 
 class ConfigError(Exception):
@@ -16,6 +32,39 @@ class ConfigError(Exception):
 
 
 DEFAULT_API_URL = "http://140.245.226.102:8080/public/m1-live.json"
+
+# Repo root's .env, resolved relative to this file rather than the current
+# working directory, so `.env` is found the same way whether the engine is
+# launched as `python main.py` from the repo root, invoked from elsewhere,
+# or imported under pytest.
+DEFAULT_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+
+def load_env_file(path: Optional[Path] = None, override: bool = False) -> bool:
+    """Load a `.env` file's KEY=VALUE pairs into `os.environ`.
+
+    Never overrides a variable already present in the environment unless
+    `override=True` is explicitly requested (it never is, in this
+    codebase) — so a value the shell or GitHub Actions already set always
+    wins over `.env`. Missing python-dotenv, or a missing/unreadable `.env`
+    file, are both silently treated as "nothing to load" (returns False)
+    rather than raised — `.env` is a local-dev convenience, never a
+    requirement. Never prints or logs the file's contents.
+    """
+    if load_dotenv is None:
+        return False
+    target = path if path is not None else DEFAULT_DOTENV_PATH
+    try:
+        return load_dotenv(dotenv_path=target, override=override)
+    except OSError:
+        return False
+
+
+# Loaded once, here, at import time: every entry point in this codebase
+# (`main.py`, the test suite, a direct `Config()` construction) imports
+# `psygrid.config` before it can read any setting, so this guarantees
+# `.env` — if present — is applied before the first `Config()` is built.
+load_env_file()
 
 # The largest single lookback window any locally-derived feature needs on
 # raw M1 data (psygrid/structure.py's default swing lookback is currently
@@ -158,4 +207,8 @@ class Config:
 
 
 def load_config() -> Config:
+    # Idempotent and safe to call again here even though load_env_file()
+    # already ran at import time: override=False means a second pass never
+    # changes anything a first pass (or the shell/CI) already set.
+    load_env_file()
     return Config()
