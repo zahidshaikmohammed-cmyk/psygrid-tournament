@@ -129,6 +129,79 @@ def _empty_report():
     )
 
 
+# -- provider symbol metadata folded into data quality -----------------------
+
+
+def _good_ingest_report(candles):
+    from psygrid.candle_store import InstrumentCandleStore
+
+    store = InstrumentCandleStore()
+    return store.ingest("XAUUSD", candles)
+
+
+def test_symbol_meta_ok_status_does_not_affect_usability():
+    from psygrid.api_client import SymbolMeta
+
+    candles = make_m1_series("XAUUSD", [100.0 + i * 0.01 for i in range(210)])
+    report = _good_ingest_report(candles)
+    now_ts = candles[-1].ts + 5
+    meta = SymbolMeta(
+        symbol="XAUUSD", market_state="open", status="ok",
+        last_candle_timestamp=candles[-1].ts, candle_count=210, gap_recoveries=0, rejected_count=0,
+    )
+    dq = assess("XAUUSD", candles, report, now_ts, 180, 200, symbol_meta=meta)
+    assert dq.is_usable
+    assert dq.provider_status_ok is True
+
+
+def test_symbol_meta_non_ok_status_marks_symbol_not_usable():
+    from psygrid.api_client import SymbolMeta
+
+    candles = make_m1_series("XAUUSD", [100.0 + i * 0.01 for i in range(210)])
+    report = _good_ingest_report(candles)
+    now_ts = candles[-1].ts + 5
+    meta = SymbolMeta(
+        symbol="XAUUSD", market_state="open", status="degraded",
+        last_candle_timestamp=candles[-1].ts, candle_count=210, gap_recoveries=0, rejected_count=0,
+    )
+    dq = assess("XAUUSD", candles, report, now_ts, 180, 200, symbol_meta=meta)
+    # OHLCV itself is perfectly fine, but the provider's own status flag
+    # must still be able to veto usability — this is what "preserved for
+    # data-quality validation" means in practice, not just decoration.
+    assert dq.provider_status_ok is False
+    assert not dq.is_usable
+    assert any("degraded" in issue for issue in dq.issues)
+
+
+def test_symbol_meta_absent_is_treated_as_neutral_not_a_failure():
+    candles = make_m1_series("XAUUSD", [100.0 + i * 0.01 for i in range(210)])
+    report = _good_ingest_report(candles)
+    now_ts = candles[-1].ts + 5
+    dq = assess("XAUUSD", candles, report, now_ts, 180, 200, symbol_meta=None)
+    assert dq.provider_status_ok is True
+    assert dq.is_usable
+
+
+def test_symbol_meta_gap_recoveries_penalize_quality_score_but_not_usability():
+    from psygrid.api_client import SymbolMeta
+
+    candles = make_m1_series("XAUUSD", [100.0 + i * 0.01 for i in range(210)])
+    report = _good_ingest_report(candles)
+    now_ts = candles[-1].ts + 5
+    clean_meta = SymbolMeta(
+        symbol="XAUUSD", market_state="open", status="ok",
+        last_candle_timestamp=candles[-1].ts, candle_count=210, gap_recoveries=0, rejected_count=0,
+    )
+    recovered_meta = SymbolMeta(
+        symbol="XAUUSD", market_state="open", status="ok",
+        last_candle_timestamp=candles[-1].ts, candle_count=210, gap_recoveries=3, rejected_count=0,
+    )
+    dq_clean = assess("XAUUSD", candles, report, now_ts, 180, 200, symbol_meta=clean_meta)
+    dq_recovered = assess("XAUUSD", candles, report, now_ts, 180, 200, symbol_meta=recovered_meta)
+    assert dq_recovered.is_usable  # gap recoveries alone don't block usability
+    assert dq_recovered.quality_score < dq_clean.quality_score
+
+
 # -- timeframe aggregation ----------------------------------------------------
 
 

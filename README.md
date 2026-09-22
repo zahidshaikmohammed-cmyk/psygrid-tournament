@@ -44,14 +44,75 @@ moves once at least `PSYGRID_HISTORICAL_MIN_SAMPLE` real resolved outcomes
 exist for that instrument/setup/regime combination. Nothing is assumed
 profitable up front.
 
+## The confirmed live schema
+
+`psygrid/api_client.py` parses the ACTUAL live schema, captured from a real
+`m1-live.json` response:
+
+```json
+{
+  "schema_version": "1.0", "service": "psygrid-forex", "provider": "realmarketapi",
+  "timeframe": "M1", "candle_source": "provider_native", "synthetic_candles": false,
+  "generated_at": "...", "status": "ok", "universe_size": 10,
+  "symbols": {
+    "<SYMBOL>": {
+      "symbol": "<SYMBOL>", "market_state": "open", "status": "ok",
+      "last_candle_timestamp": "...", "candle_count": 0, "gap_recoveries": 0, "rejected_count": 0,
+      "candles": [
+        {"timestamp": "...", "open": 0, "high": 0, "low": 0, "close": 0, "volume": 0, "bid": null, "ask": null}
+      ]
+    }
+  }
+}
+```
+
+`payload["symbols"]` is the authoritative instrument universe — nothing
+outside it is ever treated as market data (an earlier version of this
+adapter guessed at the schema before a real response was available, and
+that guess was wrong: it treated top-level metadata scalars like
+`schema_version`/`service`/`timeframe` as if they were zero-candle
+instrument entries, which is exactly what produced a misleading
+`Instruments: 8` on a real run rather than a real 8-of-10 figure. That
+guessing logic has been replaced entirely — see `tests/test_api_client.py`
+for `test_all_ten_symbols_parse_correctly` and friends).
+
+Two categories of validation apply, deliberately kept separate:
+
+- **FATAL** (raises `ApiError`, the whole fetch is discarded — same
+  handling as a network failure): `timeframe != "M1"`,
+  `candle_source != "provider_native"`, `synthetic_candles != false`, or
+  top-level `status != "ok"`. Any of these mean the payload cannot be
+  trusted as genuine, non-synthetic, provider-native M1 data at all.
+- **NON-FATAL / reported** (whatever's valid is still used):
+  `universe_size` below what's expected, or an individual symbol whose
+  `candles` array is missing/empty/entirely malformed. The exact symbol
+  name is recorded (`FetchResult.rejected_symbols`) wherever the payload
+  named it at all — the engine also remembers every symbol name it has
+  ever seen live so it can name one that disappears from the payload
+  *entirely* on a later fetch, not just one that's present-but-broken.
+  `Engine.render_status()` surfaces this honestly (`Instruments: 8/10
+  usable`, `Coverage: PARTIAL`, `Rejected by provider: SYM_A, SYM_B`)
+  rather than a gate being loosened to make the screen say `LIVE`/`10/10`
+  when it isn't.
+
+Per-symbol metadata (`status`, `market_state`, `gap_recoveries`,
+`rejected_count`) is preserved and folded into
+`psygrid/data_quality.py`'s usability/quality determination, not just
+carried along for display — a symbol whose own provider-reported `status`
+isn't `"ok"` is marked not usable even if its OHLCV data looks fine in
+isolation.
+
 ## Raw data vs. engine-derived features (and indicator policy)
 
 **RealMarketAPI's contract is OHLCV + timestamp only.** It provides no
-RSI, EMA, MACD, ATR, VWAP, Bollinger Bands, or any other indicator, and
-`psygrid/api_client.py` reads exactly six fields per candle (open/high/
-low/close/volume/time — see `OPEN_KEYS`/`HIGH_KEYS`/`LOW_KEYS`/
-`CLOSE_KEYS`/`VOLUME_KEYS`/`TIME_KEYS`); anything else present in a payload
-(an indicator field a future provider version might add) is parsed out and
+RSI, EMA, MACD, ATR, VWAP, Bollinger Bands, or any other indicator.
+`psygrid/api_client.py` parses the CONFIRMED live schema (captured from a
+real response — see *The confirmed live schema* below): six fields per
+candle (`timestamp`/`open`/`high`/`low`/`close`/`volume`), plus `bid`/`ask`
+which are present but never read (they're `null` in practice and the
+OHLCV-only strategy has no use for them — a null `bid`/`ask` is never a
+reason to reject a candle). Anything else present in a payload (an
+indicator field a future provider version might add) is parsed out and
 discarded, never stored on a `Candle` or used anywhere downstream — `Candle`
 is a fixed-field dataclass with no slot an extra value could ride along in
 (verified in `tests/test_api_client.py`).
@@ -118,7 +179,7 @@ psygrid-tournament/
 │       └── ci.yml                pytest job + Telegram connectivity job
 ├── psygrid/
 │   ├── config.py                env-var driven configuration + validation
-│   ├── api_client.py            RealMarketAPI fetch + defensive parsing
+│   ├── api_client.py            RealMarketAPI fetch, confirmed live-schema parsing
 │   ├── candle_store.py          rolling per-instrument M1 state, continuity
 │   ├── timeframes.py            genuine M1 -> M5/M15/M30/H1 aggregation
 │   ├── data_quality.py          freshness / continuity / history checks
@@ -144,7 +205,7 @@ psygrid-tournament/
     ├── test_secrets.py             secret loading, fail-safe errors, redaction
     ├── test_dotenv.py               .env loading, shell/CI precedence
     ├── test_indicator_calculations.py  hand-computed ATR/ROC/swings/aggregation
-    └── test_*.py                   ~128 tests across every module
+    └── test_*.py                   ~155 tests across every module
 ```
 
 ## Configuring environment variables
@@ -255,7 +316,7 @@ pip install -r requirements.txt
 python -m pytest tests/ -q
 ```
 
-128 deterministic tests cover: API parsing (including malformed/partial
+155 deterministic tests cover: API parsing (including malformed/partial
 payloads), stale/missing/misaligned candle data, M5/M15/M30/H1 aggregation
 correctness (including that no bucket is ever fabricated), structure/setup
 detection, hard-gate disqualification, candidate ranking and deterministic
@@ -269,7 +330,7 @@ anywhere in the suite — every fixture is an explicit, reproducible formula.
 
 ## Verification performed before calling this done
 
-1. `python -m pytest tests/ -q` → **128 passed**.
+1. `python -m pytest tests/ -q` → **155 passed**.
 2. `python main.py --demo --once` → all 10 synthetic instruments analyzed
    in parallel, a full tournament ran, and exactly one Telegram message was
    generated (verified with `PSYGRID_MIN_QUALITY_SCORE` at both its default
@@ -278,17 +339,19 @@ anywhere in the suite — every fixture is an explicit, reproducible formula.
 3. `python main.py --demo` run for several ticks under a short scan
    interval → confirmed the tournament fires exactly once per 30-minute
    boundary and the terminal status view updates every scan tick.
-4. **Live RealMarketAPI connectivity was not verified from this development
-   sandbox** — outbound requests to the given endpoint's raw IP
-   (`140.245.226.102:8080`) are not routable from this container (they time
-   out at the network layer, independent of this codebase). `main.py`'s
-   startup step 2/6 will perform this check for real the first time you run
-   it in an environment with normal internet access, and will clearly print
-   whether RealMarketAPI was reachable. If the live payload's field names
-   differ from the aliases already handled in `psygrid/api_client.py`
-   (`TIME_KEYS`/`OPEN_KEYS`/`HIGH_KEYS`/`LOW_KEYS`/`CLOSE_KEYS`/`VOLUME_KEYS`/
-   `CANDLES_KEYS`), extend those tuples — nothing else in the engine needs
-   to change.
+4. The adapter (`psygrid/api_client.py`) is now written and tested against
+   the CONFIRMED live schema (a real `m1-live.json` response was captured
+   and used to build `tests/fixtures.py`'s `live_payload_json` — see *The
+   confirmed live schema* above), including a regression test proving the
+   earlier schema guess's exact failure mode (`Instruments: 8` from
+   metadata being misparsed as zero-candle instruments) can no longer
+   happen (`test_missing_symbols_key_raises_api_error` and friends).
+   Literal network reachability of `140.245.226.102:8080` was not
+   re-verified from this sandbox — that IP is not routable from this
+   container at the network layer, independent of this codebase.
+   `main.py`'s startup step 2/6 performs this check for real the first
+   time you run it in an environment with normal internet access, and
+   prints exactly how many symbols parsed and whether coverage is full.
 
 ## Honest limitations (V1)
 

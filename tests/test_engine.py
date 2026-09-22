@@ -182,3 +182,85 @@ def test_restart_recovery_seeds_clock_from_persisted_tournament(tmp_path):
     fire, _ = engine2.clock.should_fire(now_holder[0] + 60)
     assert not fire  # same 30-min window as the tournament already recorded
     persistence2.close()
+
+
+# ---------------------------------------------------------------------------
+# Real-schema coverage reporting: rejected/missing symbols named, not hidden
+# ---------------------------------------------------------------------------
+
+
+def test_engine_names_rejected_symbols_and_reflects_them_in_status(tmp_path):
+    from tests.fixtures import live_payload_json
+
+    good, weak = _two_instrument_fixture()
+    now_holder = [good[-1].ts + 5]
+    payload = live_payload_json(
+        {"XAUUSD": good, "EURUSD": weak},
+        server_time=good[-1].ts,
+        extra_symbol_overrides={"EURUSD": {"candles": []}},
+    )
+    config = Config(min_quality_score=1.0, history_min_candles=200, expected_instrument_count=2)
+    engine, persistence, sent = _make_engine(tmp_path, lambda: payload, now_holder, config=config)
+
+    engine.scan_once()
+
+    assert "EURUSD" in engine.last_rejected_symbols
+    assert "XAUUSD" not in engine.last_rejected_symbols
+    status = engine.render_status()
+    assert "EURUSD" in status
+    assert "Rejected by provider" in status
+    assert "PARTIAL" in status
+
+    events = persistence._conn.execute(
+        "SELECT * FROM data_quality_events WHERE event_type = 'symbol_rejected'"
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["instrument"] == "EURUSD"
+    persistence.close()
+
+
+def test_engine_reports_a_symbol_that_vanishes_entirely_on_a_later_fetch(tmp_path):
+    from tests.fixtures import live_payload_json
+
+    good, weak = _two_instrument_fixture()
+    now_holder = [good[-1].ts + 5]
+    full_payload = live_payload_json({"XAUUSD": good, "EURUSD": weak}, server_time=good[-1].ts)
+    dropped_payload = live_payload_json({"XAUUSD": good}, server_time=good[-1].ts)
+
+    calls = {"n": 0}
+
+    def fetch_fn():
+        calls["n"] += 1
+        return full_payload if calls["n"] == 1 else dropped_payload
+
+    config = Config(min_quality_score=1.0, history_min_candles=200, expected_instrument_count=2)
+    engine, persistence, sent = _make_engine(tmp_path, fetch_fn, now_holder, config=config)
+
+    engine.scan_once()  # sees both XAUUSD and EURUSD
+    assert engine.known_symbols == {"XAUUSD", "EURUSD"}
+
+    now_holder[0] += 60
+    engine.scan_once()  # EURUSD is now entirely absent from the payload
+
+    events = persistence._conn.execute(
+        "SELECT * FROM data_quality_events WHERE event_type = 'symbol_vanished'"
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["instrument"] == "EURUSD"
+    persistence.close()
+
+
+def test_engine_status_shows_full_coverage_when_all_expected_instruments_are_usable(tmp_path):
+    from tests.fixtures import live_payload_json
+
+    good, weak = _two_instrument_fixture()
+    now_holder = [good[-1].ts + 5]
+    payload = live_payload_json({"XAUUSD": good, "EURUSD": good}, server_time=good[-1].ts)
+    config = Config(min_quality_score=1.0, history_min_candles=200, expected_instrument_count=2)
+    engine, persistence, sent = _make_engine(tmp_path, lambda: payload, now_holder, config=config)
+
+    engine.scan_once()
+    status = engine.render_status()
+    assert "Coverage: FULL" in status
+    assert "2/2 usable" in status
+    persistence.close()

@@ -1,24 +1,54 @@
 """RealMarketAPI client.
 
-Fetches ``m1-live.json`` and parses it into :class:`psygrid.models.Candle`
-objects, defensively. The exact schema of the live endpoint was not
-reachable from the development sandbox this engine was built in, so the
-parser accepts several plausible shapes/key-aliases rather than assuming one
-exact layout. If the live payload uses field names outside the aliases
-below, extend ``TIME_KEYS`` / ``OPEN_KEYS`` / etc. — nothing else in the
-engine needs to change.
+Parses the CONFIRMED live schema of ``m1-live.json`` (verified against a
+real response captured from the provider):
+
+    {
+      "schema_version": "1.0",
+      "service": "psygrid-forex",
+      "provider": "realmarketapi",
+      "timeframe": "M1",
+      "candle_source": "provider_native",
+      "synthetic_candles": false,
+      "generated_at": "...",
+      "status": "ok",
+      "universe_size": 10,
+      "symbols": {
+          "<SYMBOL>": {
+              "symbol": "<SYMBOL>",
+              "market_state": "open",
+              "status": "ok",
+              "last_candle_timestamp": "...",
+              "candle_count": ...,
+              "gap_recoveries": ...,
+              "rejected_count": ...,
+              "candles": [
+                  {"timestamp": "...", "open": ..., "high": ..., "low": ...,
+                   "close": ..., "volume": ..., "bid": null, "ask": null}
+              ]
+          }
+      }
+    }
+
+``payload["symbols"]`` is the authoritative instrument universe — nothing
+outside it is ever treated as market data. ``bid``/``ask`` are read from
+neither the payload nor stored on :class:`~psygrid.models.Candle`: the
+OHLCV-only strategy has no use for them, and their being ``null`` is never
+a reason to reject an otherwise-valid candle.
 
 NEVER fabricates data: any candle that fails validation is dropped and
-recorded as a data-quality issue, never guessed or interpolated.
+recorded as a data-quality issue, never guessed or interpolated. Never
+synthesizes a candle here — M5/M15/M30/H1 derivation happens strictly
+downstream, in :mod:`psygrid.timeframes`, from genuine M1 candles only.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, List, Optional
 
 try:
     import requests
@@ -27,14 +57,18 @@ except ImportError:  # pragma: no cover
 
 from .models import Candle
 
-TIME_KEYS = ("time", "timestamp", "t", "ts", "datetime", "date")
+# "timestamp" is the confirmed live field name and is tried first; the
+# others remain as tolerant fallbacks in case of minor provider variation.
+TIME_KEYS = ("timestamp", "time", "t", "ts", "datetime", "date")
 OPEN_KEYS = ("open", "o")
 HIGH_KEYS = ("high", "h")
 LOW_KEYS = ("low", "l")
 CLOSE_KEYS = ("close", "c")
 VOLUME_KEYS = ("volume", "vol", "v", "tick_volume")
-CANDLES_KEYS = ("candles", "bars", "m1", "data", "ohlc")
-SYMBOL_KEYS = ("symbol", "instrument", "ticker", "pair")
+
+REQUIRED_TIMEFRAME = "M1"
+REQUIRED_CANDLE_SOURCE = "provider_native"
+REQUIRED_STATUS = "ok"
 
 
 class ApiError(Exception):
@@ -42,14 +76,48 @@ class ApiError(Exception):
 
 
 @dataclass
+class ProviderMeta:
+    """Top-level payload metadata, preserved verbatim for data-quality use."""
+
+    schema_version: Optional[str]
+    service: Optional[str]
+    provider: Optional[str]
+    timeframe: Optional[str]
+    candle_source: Optional[str]
+    synthetic_candles: Optional[bool]
+    generated_at: Optional[str]
+    status: Optional[str]
+    universe_size: Optional[int]
+
+
+@dataclass
+class SymbolMeta:
+    """Per-symbol metadata, preserved verbatim for data-quality use."""
+
+    symbol: str
+    market_state: Optional[str]
+    status: Optional[str]
+    last_candle_timestamp: Optional[str]
+    candle_count: Optional[int]
+    gap_recoveries: Optional[int]
+    rejected_count: Optional[int]
+
+
+@dataclass
 class FetchResult:
     ok: bool
     fetched_at: int
     raw_bytes: int
-    instruments: dict  # instrument -> list[Candle], sorted ascending by ts
+    instruments: Dict[str, List[Candle]]  # symbol -> candles, only symbols with >=1 valid candle
     server_time: Optional[int]
     parse_errors: list
-    skipped_candles: dict  # instrument -> count of dropped/invalid candles
+    skipped_candles: Dict[str, int]  # symbol -> count of dropped/invalid candles
+    provider_meta: ProviderMeta
+    symbol_meta: Dict[str, SymbolMeta] = field(default_factory=dict)  # every symbol key seen, valid or not
+    rejected_symbols: Dict[str, str] = field(default_factory=dict)  # symbol -> reason, present but unusable
+    universe_size_expected: Optional[int] = None
+    universe_size_actual: int = 0
+    coverage_issues: list = field(default_factory=list)
 
 
 def _first(d: dict, keys) -> Optional[object]:
@@ -90,6 +158,10 @@ def _to_epoch(value) -> Optional[int]:
 
 
 def _parse_candle(instrument: str, raw: dict) -> Optional[Candle]:
+    """Map one raw candle dict to a Candle. `bid`/`ask`, if present, are
+    simply never read — Candle has no field for them and the OHLCV-only
+    strategy does not need them (a null bid/ask must never cause rejection
+    here; only missing/invalid OHLCV does)."""
     if not isinstance(raw, dict):
         return None
     ts = _to_epoch(_first(raw, TIME_KEYS))
@@ -117,77 +189,144 @@ def _parse_candle(instrument: str, raw: dict) -> Optional[Candle]:
     return candle
 
 
-def _extract_candle_list(entry) -> list:
-    """Given a per-instrument entry, return the raw list of candle dicts."""
-    if isinstance(entry, list):
-        return entry
-    if isinstance(entry, dict):
-        found = _first(entry, CANDLES_KEYS)
-        if isinstance(found, list):
-            return found
-    return []
+def parse_payload(
+    raw_text: str,
+    fetched_at: Optional[int] = None,
+    expected_universe_size: Optional[int] = None,
+) -> FetchResult:
+    """Parse a RealMarketAPI response against the confirmed live schema.
 
-
-def parse_payload(raw_text: str, fetched_at: Optional[int] = None) -> FetchResult:
+    Raises :class:`ApiError` if the JSON is invalid, ``symbols`` is absent
+    or malformed, or the payload fails a FATAL provider-contract check
+    (``timeframe``, ``candle_source``, ``synthetic_candles``, top-level
+    ``status``) — these mean the payload cannot be trusted as genuine,
+    provider-native, non-synthetic M1 data at all, so nothing in it is
+    used. A ``universe_size`` shortfall is NOT fatal: whatever symbols
+    *are* present and valid are still parsed and returned, with the gap
+    reported via ``coverage_issues``/``rejected_symbols`` rather than
+    silently treated as full, healthy coverage.
+    """
     fetched_at = fetched_at if fetched_at is not None else int(time.time())
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         raise ApiError(f"Invalid JSON from RealMarketAPI: {exc}") from exc
 
-    parse_errors: list = []
-    instruments: dict = {}
-    skipped: dict = {}
-    server_time = None
-
-    if isinstance(payload, dict):
-        server_time = _to_epoch(payload.get("server_time") or payload.get("timestamp"))
-        # Shape A: {"instruments": {SYM: {...}}}
-        instr_block = payload.get("instruments")
-        if isinstance(instr_block, dict):
-            entries = instr_block.items()
-        else:
-            # Shape B: top-level dict keyed directly by instrument symbol.
-            reserved = {"instruments", "server_time", "timestamp", "status", "meta"}
-            entries = [(k, v) for k, v in payload.items() if k not in reserved]
-        for symbol, entry in entries:
-            raw_list = _extract_candle_list(entry)
-            if not raw_list and isinstance(entry, dict):
-                continue
-            candles = []
-            bad = 0
-            for raw_c in raw_list:
-                candle = _parse_candle(str(symbol), raw_c)
-                if candle is None:
-                    bad += 1
-                    continue
-                candles.append(candle)
-            candles.sort(key=lambda c: c.ts)
-            instruments[str(symbol)] = candles
-            skipped[str(symbol)] = bad
-    elif isinstance(payload, list):
-        # Shape C: [{"symbol": "XAUUSD", "candles": [...]}, ...]
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            symbol = _first(item, SYMBOL_KEYS)
-            if symbol is None:
-                continue
-            raw_list = _extract_candle_list(item)
-            candles = []
-            bad = 0
-            for raw_c in raw_list:
-                candle = _parse_candle(str(symbol), raw_c)
-                if candle is None:
-                    bad += 1
-                    continue
-                candles.append(candle)
-            candles.sort(key=lambda c: c.ts)
-            instruments[str(symbol)] = candles
-            skipped[str(symbol)] = bad
-    else:
+    if not isinstance(payload, dict):
         raise ApiError(f"Unexpected top-level JSON type from RealMarketAPI: {type(payload)}")
 
+    symbols_block = payload.get("symbols")
+    if not isinstance(symbols_block, dict):
+        raise ApiError(
+            "RealMarketAPI payload is missing a valid 'symbols' object — "
+            "payload['symbols'] is the authoritative instrument universe "
+            "and nothing can be parsed without it."
+        )
+
+    timeframe = payload.get("timeframe")
+    candle_source = payload.get("candle_source")
+    synthetic_candles = payload.get("synthetic_candles")
+    status = payload.get("status")
+
+    fatal = []
+    if timeframe != REQUIRED_TIMEFRAME:
+        fatal.append(f"timeframe={timeframe!r} (require {REQUIRED_TIMEFRAME!r})")
+    if candle_source != REQUIRED_CANDLE_SOURCE:
+        fatal.append(f"candle_source={candle_source!r} (require {REQUIRED_CANDLE_SOURCE!r})")
+    if synthetic_candles is not False:
+        fatal.append(f"synthetic_candles={synthetic_candles!r} (require False)")
+    if status != REQUIRED_STATUS:
+        fatal.append(f"status={status!r} (require {REQUIRED_STATUS!r})")
+    if fatal:
+        raise ApiError(
+            "RealMarketAPI payload failed provider-contract validation — refusing to "
+            "trust it rather than silently using possibly-synthetic or stale data: "
+            + "; ".join(fatal)
+        )
+
+    provider_meta = ProviderMeta(
+        schema_version=payload.get("schema_version"),
+        service=payload.get("service"),
+        provider=payload.get("provider"),
+        timeframe=timeframe,
+        candle_source=candle_source,
+        synthetic_candles=synthetic_candles,
+        generated_at=payload.get("generated_at"),
+        status=status,
+        universe_size=payload.get("universe_size"),
+    )
+    server_time = _to_epoch(provider_meta.generated_at)
+
+    instruments: Dict[str, List[Candle]] = {}
+    skipped: Dict[str, int] = {}
+    symbol_meta: Dict[str, SymbolMeta] = {}
+    rejected_symbols: Dict[str, str] = {}
+
+    for raw_symbol, entry in symbols_block.items():
+        symbol = str(raw_symbol)
+
+        if not isinstance(entry, dict):
+            rejected_symbols[symbol] = "symbol entry is not an object"
+            continue
+
+        symbol_meta[symbol] = SymbolMeta(
+            symbol=str(entry.get("symbol", symbol)),
+            market_state=entry.get("market_state"),
+            status=entry.get("status"),
+            last_candle_timestamp=entry.get("last_candle_timestamp"),
+            candle_count=entry.get("candle_count"),
+            gap_recoveries=entry.get("gap_recoveries"),
+            rejected_count=entry.get("rejected_count"),
+        )
+
+        raw_candles = entry.get("candles")
+        if not isinstance(raw_candles, list):
+            rejected_symbols[symbol] = "missing or invalid 'candles' array"
+            continue
+
+        candles: List[Candle] = []
+        bad = 0
+        for raw_c in raw_candles:
+            candle = _parse_candle(symbol, raw_c)
+            if candle is None:
+                bad += 1
+                continue
+            candles.append(candle)
+        candles.sort(key=lambda c: c.ts)
+        skipped[symbol] = bad
+
+        if not candles:
+            rejected_symbols[symbol] = (
+                "candles array is empty"
+                if not raw_candles
+                else f"no valid candles parsed ({bad} of {len(raw_candles)} rejected)"
+            )
+            continue
+
+        instruments[symbol] = candles
+
+    universe_size_actual = len(symbols_block)
+    coverage_issues: list = []
+    if provider_meta.universe_size is not None and provider_meta.universe_size != universe_size_actual:
+        coverage_issues.append(
+            f"provider declared universe_size={provider_meta.universe_size} but the payload "
+            f"contains {universe_size_actual} symbol entries"
+        )
+    if expected_universe_size is not None and universe_size_actual < expected_universe_size:
+        # We only know the NAMES of symbols the provider actually mentioned
+        # (rejected_symbols, below); any symbol never mentioned at all
+        # cannot be named from this payload alone.
+        coverage_issues.append(
+            f"only {universe_size_actual}/{expected_universe_size} expected symbols are "
+            "present in the payload at all"
+        )
+    if rejected_symbols:
+        coverage_issues.append(
+            f"{len(rejected_symbols)} symbol(s) present in the payload but unusable: "
+            + ", ".join(f"{sym} ({reason})" for sym, reason in sorted(rejected_symbols.items()))
+        )
+
+    parse_errors = list(coverage_issues)
     if not instruments:
         parse_errors.append("No instruments could be parsed from the payload.")
 
@@ -199,6 +338,12 @@ def parse_payload(raw_text: str, fetched_at: Optional[int] = None) -> FetchResul
         server_time=server_time,
         parse_errors=parse_errors,
         skipped_candles=skipped,
+        provider_meta=provider_meta,
+        symbol_meta=symbol_meta,
+        rejected_symbols=rejected_symbols,
+        universe_size_expected=expected_universe_size,
+        universe_size_actual=universe_size_actual,
+        coverage_issues=coverage_issues,
     )
 
 
@@ -217,7 +362,7 @@ class RealMarketApiClient:
         resp.raise_for_status()
         return resp.text
 
-    def fetch(self) -> FetchResult:
+    def fetch(self, expected_universe_size: Optional[int] = None) -> FetchResult:
         try:
             if self._fetch_fn is not None:
                 raw_text = self._fetch_fn()
@@ -227,4 +372,4 @@ class RealMarketApiClient:
             raise
         except Exception as exc:  # network errors of any kind
             raise ApiError(f"RealMarketAPI request failed: {exc}") from exc
-        return parse_payload(raw_text)
+        return parse_payload(raw_text, expected_universe_size=expected_universe_size)

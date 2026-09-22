@@ -113,24 +113,77 @@ def make_sweep_series(instrument: str, n: int = 220, base: float = 100.0, start_
     return candles
 
 
-def api_payload_json(instrument_candles: dict, server_time: Optional[int] = None) -> str:
-    payload = {
-        "server_time": server_time if server_time is not None else BASE_TS,
-        "instruments": {
-            symbol: {
-                "candles": [
-                    {
-                        "time": c.ts,
-                        "open": c.open,
-                        "high": c.high,
-                        "low": c.low,
-                        "close": c.close,
-                        "volume": c.volume,
-                    }
-                    for c in candles
-                ]
+def live_symbol_block(candles: List[Candle], market_state: str = "open", status: str = "ok") -> dict:
+    """One entry of payload["symbols"][SYMBOL], matching the confirmed live
+    RealMarketAPI schema exactly (including bid/ask, always null — the
+    OHLCV-only strategy never reads them)."""
+    return {
+        "symbol": candles[0].instrument if candles else "",
+        "market_state": market_state,
+        "status": status,
+        "last_candle_timestamp": candles[-1].ts if candles else None,
+        "candle_count": len(candles),
+        "gap_recoveries": 0,
+        "rejected_count": 0,
+        "candles": [
+            {
+                "timestamp": c.ts,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume,
+                "bid": None,
+                "ask": None,
             }
-            for symbol, candles in instrument_candles.items()
-        },
+            for c in candles
+        ],
+    }
+
+
+def live_payload_json(
+    instrument_candles: dict,
+    server_time: Optional[int] = None,
+    universe_size: Optional[int] = None,
+    timeframe: str = "M1",
+    candle_source: str = "provider_native",
+    synthetic_candles: bool = False,
+    status: str = "ok",
+    extra_symbol_overrides: Optional[dict] = None,
+) -> str:
+    """Build a payload matching the CONFIRMED live RealMarketAPI schema
+    (top-level schema_version/service/provider/timeframe/candle_source/
+    synthetic_candles/generated_at/status/universe_size + a "symbols" dict).
+
+    ``extra_symbol_overrides``, if given, is ``{symbol: {field: value}}``
+    applied on top of the generated per-symbol block — used to build
+    malformed/edge-case fixtures (bad status, missing candles array, etc.)
+    without hand-writing the whole payload.
+    """
+    generated_at = server_time if server_time is not None else BASE_TS
+    symbols = {}
+    for symbol, candles in instrument_candles.items():
+        block = live_symbol_block(candles)
+        if extra_symbol_overrides and symbol in extra_symbol_overrides:
+            block.update(extra_symbol_overrides[symbol])
+        symbols[symbol] = block
+
+    payload = {
+        "schema_version": "1.0",
+        "service": "psygrid-forex",
+        "provider": "realmarketapi",
+        "timeframe": timeframe,
+        "candle_source": candle_source,
+        "synthetic_candles": synthetic_candles,
+        "generated_at": generated_at,
+        "status": status,
+        "universe_size": universe_size if universe_size is not None else len(instrument_candles),
+        "symbols": symbols,
     }
     return json.dumps(payload)
+
+
+# Backwards-compatible alias: the engine-level test suite builds payloads
+# via this name. It now emits the confirmed live schema (see
+# `live_payload_json`) rather than the old, disproven guessed shape.
+api_payload_json = live_payload_json

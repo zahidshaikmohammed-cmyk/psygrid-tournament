@@ -52,6 +52,14 @@ class Engine:
         self.scan_count = 0
         self.tournament_count = 0
         self.last_tournament_result: Optional[TournamentResult] = None
+        # Every symbol name RealMarketAPI has ever mentioned (usable or
+        # not) across the life of this engine instance — lets us name a
+        # symbol that disappears from the payload entirely on a later
+        # fetch, which a single fetch's own data can never do by itself.
+        self.known_symbols: set = set()
+        self.last_rejected_symbols: Dict[str, str] = {}
+        self.last_coverage_issues: list = []
+        self.last_universe_size_actual: Optional[int] = None
         self.clock = TournamentClock.restore(
             config.tournament_interval_minutes, persistence.last_tournament_ts()
         )
@@ -61,7 +69,7 @@ class Engine:
     def scan_once(self) -> None:
         now_ts = int(self.now_fn())
         try:
-            result = self.api_client.fetch()
+            result = self.api_client.fetch(expected_universe_size=self.config.expected_instrument_count)
         except ApiError as exc:
             self.last_fetch_ok = False
             self.last_error = str(exc)
@@ -84,6 +92,30 @@ class Engine:
             result.parse_errors,
         )
 
+        # Symbols the provider named this cycle, whether usable or not —
+        # used below to detect a symbol vanishing from the payload
+        # entirely on a later fetch (never present as either a usable
+        # instrument or a rejected one).
+        seen_this_cycle = set(result.instruments.keys()) | set(result.rejected_symbols.keys())
+
+        for symbol, reason in result.rejected_symbols.items():
+            self.persistence.log_data_quality_event(symbol, "symbol_rejected", reason, now_ts)
+
+        for issue in result.coverage_issues:
+            self.persistence.log_data_quality_event("__universe__", "coverage_issue", issue, now_ts)
+
+        if self.known_symbols:
+            vanished = self.known_symbols - seen_this_cycle
+            for symbol in vanished:
+                self.persistence.log_data_quality_event(
+                    symbol, "symbol_vanished", "previously seen but absent from this payload entirely", now_ts
+                )
+        self.known_symbols |= seen_this_cycle
+
+        self.last_rejected_symbols = dict(result.rejected_symbols)
+        self.last_coverage_issues = list(result.coverage_issues)
+        self.last_universe_size_actual = result.universe_size_actual
+
         for instrument, candles in result.instruments.items():
             ingest_report = self.store.ingest(instrument, candles)
             self.persistence.save_m1_candles(candles)
@@ -95,7 +127,12 @@ class Engine:
                     now_ts,
                 )
             analysis = analyze_instrument(
-                instrument, self.store.candles(instrument), ingest_report, now_ts, self.config
+                instrument,
+                self.store.candles(instrument),
+                ingest_report,
+                now_ts,
+                self.config,
+                symbol_meta=result.symbol_meta.get(instrument),
             )
             self.analyses[instrument] = analysis
 
@@ -199,15 +236,26 @@ class Engine:
         next_tournament = datetime.fromtimestamp(next_boundary, tz=timezone.utc).strftime("%H:%M:%S")
         data_status = "LIVE" if self.last_fetch_ok else "DEGRADED" if self.last_fetch_ok is not None else "STARTING"
 
+        expected = self.config.expected_instrument_count
+        usable_count = sum(1 for a in self.analyses.values() if a.data_quality.is_usable)
+        coverage_complete = usable_count >= expected and not self.last_rejected_symbols
+
         lines = [
             "PSYGRID TOURNAMENT ENGINE",
             "Status: RUNNING",
-            f"Instruments: {len(self.analyses)}",
+            f"Instruments: {usable_count}/{expected} usable ({len(self.analyses)} parsed)",
             f"Data: {data_status}",
+            f"Coverage: {'FULL' if coverage_complete else 'PARTIAL'}",
             f"Last update (UTC): {last_update}",
             f"Next tournament (UTC): {next_tournament}",
-            "",
         ]
+        if self.last_rejected_symbols:
+            names = ", ".join(sorted(self.last_rejected_symbols))
+            lines.append(f"Rejected by provider: {names}")
+        if self.last_coverage_issues:
+            for issue in self.last_coverage_issues:
+                lines.append(f"Coverage issue: {issue}")
+        lines.append("")
         for instrument in sorted(self.analyses.keys()):
             analysis = self.analyses[instrument]
             if not analysis.data_quality.is_usable:

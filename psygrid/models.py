@@ -83,6 +83,20 @@ class DataQualityReport:
     duplicate_count: int
     invalid_ohlc_count: int
     issues: list = field(default_factory=list)
+    # Provider-reported metadata (RealMarketAPI's per-symbol status/
+    # market_state/gap_recoveries/rejected_count), preserved here so it
+    # actively participates in the usability/quality determination below —
+    # not just carried along decoratively. Absent (None) when the caller
+    # has no provider metadata to give (e.g. synthetic test fixtures),
+    # which is treated as neutral/OK rather than a failure.
+    provider_status: Optional[str] = None
+    provider_market_state: Optional[str] = None
+    provider_gap_recoveries: int = 0
+    provider_rejected_count: int = 0
+
+    @property
+    def provider_status_ok(self) -> bool:
+        return self.provider_status is None or self.provider_status == "ok"
 
     @property
     def is_usable(self) -> bool:
@@ -91,6 +105,7 @@ class DataQualityReport:
             and self.has_sufficient_history
             and self.timestamps_valid
             and self.invalid_ohlc_count == 0
+            and self.provider_status_ok
         )
 
     @property
@@ -110,6 +125,10 @@ class DataQualityReport:
             score -= min(10.0, self.duplicate_count)
         if self.invalid_ohlc_count:
             score -= min(25.0, self.invalid_ohlc_count * 5.0)
+        if not self.provider_status_ok:
+            score -= 30
+        if self.provider_gap_recoveries:
+            score -= min(10.0, self.provider_gap_recoveries * 2.0)
         return max(0.0, min(100.0, score))
 
 

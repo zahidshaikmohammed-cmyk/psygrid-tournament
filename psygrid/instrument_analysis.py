@@ -9,7 +9,7 @@ that defines "the common analytical framework" the spec requires.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from .candle_store import IngestReport
 from .config import Config
@@ -25,6 +25,9 @@ from .time_behavior import analyze_time_behavior
 from .timeframes import aggregate_all
 from .volatility import analyze_volatility
 
+if TYPE_CHECKING:
+    from .api_client import SymbolMeta
+
 CONTEXT_TIMEFRAME = "M15"
 
 
@@ -34,6 +37,7 @@ def analyze_instrument(
     ingest_report: IngestReport,
     now_ts: int,
     config: Config,
+    symbol_meta: Optional[SymbolMeta] = None,
 ) -> InstrumentAnalysis:
     data_quality = assess_data_quality(
         instrument,
@@ -42,6 +46,7 @@ def analyze_instrument(
         now_ts,
         config.freshness_max_seconds,
         config.history_min_candles,
+        symbol_meta=symbol_meta,
     )
 
     current_price = m1_candles[-1].close if m1_candles else None

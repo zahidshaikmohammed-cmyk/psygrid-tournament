@@ -85,12 +85,14 @@ class DemoFeedGenerator:
             low = min(open_price, close_price) - wick
 
         return {
-            "time": ts,
+            "timestamp": ts,
             "open": round(open_price, 5),
             "high": round(high, 5),
             "low": round(low, 5),
             "close": round(close_price, 5),
             "volume": 100.0,
+            "bid": None,
+            "ask": None,
         }
 
     def next_payload(self) -> str:
@@ -108,7 +110,7 @@ class DemoFeedGenerator:
         for sym_idx, symbol in enumerate(INSTRUMENTS):
             params = _params(sym_idx)
             candle = self._make_candle(symbol, params, self.next_bar_index)
-            if self._history[symbol] and self._history[symbol][-1]["time"] == candle["time"]:
+            if self._history[symbol] and self._history[symbol][-1]["timestamp"] == candle["timestamp"]:
                 self._history[symbol][-1] = candle
             else:
                 self._history[symbol].append(candle)
@@ -116,8 +118,32 @@ class DemoFeedGenerator:
                 self._history[symbol] = self._history[symbol][-1600:]
         self.next_bar_index += 1
 
+        generated_at = self._history[INSTRUMENTS[0]][-1]["timestamp"]
         payload = {
-            "server_time": self._history[INSTRUMENTS[0]][-1]["time"],
-            "instruments": {sym: {"candles": self._history[sym]} for sym in INSTRUMENTS},
+            # Matches the CONFIRMED live RealMarketAPI schema exactly (see
+            # psygrid/api_client.py's module docstring) so --demo exercises
+            # the real parsing/validation path, not a stand-in shape.
+            "schema_version": "1.0",
+            "service": "psygrid-forex",
+            "provider": "realmarketapi",
+            "timeframe": "M1",
+            "candle_source": "provider_native",
+            "synthetic_candles": False,
+            "generated_at": generated_at,
+            "status": "ok",
+            "universe_size": len(INSTRUMENTS),
+            "symbols": {
+                sym: {
+                    "symbol": sym,
+                    "market_state": "open",
+                    "status": "ok",
+                    "last_candle_timestamp": self._history[sym][-1]["timestamp"],
+                    "candle_count": len(self._history[sym]),
+                    "gap_recoveries": 0,
+                    "rejected_count": 0,
+                    "candles": self._history[sym],
+                }
+                for sym in INSTRUMENTS
+            },
         }
         return json.dumps(payload)

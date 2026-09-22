@@ -1,15 +1,22 @@
 """Data-quality assessment: freshness, continuity, history sufficiency.
 
 NO DATA = UNKNOWN. This module never fabricates missing candles; it only
-measures and reports.
+measures and reports. When RealMarketAPI's own per-symbol metadata
+(``status``, ``market_state``, ``gap_recoveries``, ``rejected_count`` —
+see :class:`psygrid.api_client.SymbolMeta`) is available, it is folded
+into the same usability/quality determination as the raw candles
+themselves, not merely recorded for decoration.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from .candle_store import IngestReport
 from .models import Candle, DataQualityReport
+
+if TYPE_CHECKING:
+    from .api_client import SymbolMeta
 
 
 def assess(
@@ -19,8 +26,21 @@ def assess(
     now_ts: int,
     freshness_max_seconds: float,
     history_min_candles: int,
+    symbol_meta: Optional[SymbolMeta] = None,
 ) -> DataQualityReport:
     issues: list = []
+
+    provider_status = symbol_meta.status if symbol_meta else None
+    provider_market_state = symbol_meta.market_state if symbol_meta else None
+    provider_gap_recoveries = (symbol_meta.gap_recoveries or 0) if symbol_meta else 0
+    provider_rejected_count = (symbol_meta.rejected_count or 0) if symbol_meta else 0
+
+    if provider_status is not None and provider_status != "ok":
+        issues.append(f"Provider reports symbol status={provider_status!r} (expected 'ok').")
+    if provider_gap_recoveries:
+        issues.append(f"Provider recovered {provider_gap_recoveries} gap(s) in this symbol's feed.")
+    if provider_rejected_count:
+        issues.append(f"Provider itself rejected {provider_rejected_count} candle(s) for this symbol.")
 
     if not candles:
         issues.append("No candles available.")
@@ -36,6 +56,10 @@ def assess(
             duplicate_count=0,
             invalid_ohlc_count=ingest_report.invalid_candles,
             issues=issues,
+            provider_status=provider_status,
+            provider_market_state=provider_market_state,
+            provider_gap_recoveries=provider_gap_recoveries,
+            provider_rejected_count=provider_rejected_count,
         )
 
     latest_ts = candles[-1].ts
@@ -71,4 +95,8 @@ def assess(
         duplicate_count=ingest_report.duplicate_candles,
         invalid_ohlc_count=ingest_report.invalid_candles,
         issues=issues,
+        provider_status=provider_status,
+        provider_market_state=provider_market_state,
+        provider_gap_recoveries=provider_gap_recoveries,
+        provider_rejected_count=provider_rejected_count,
     )
