@@ -7,10 +7,12 @@ been captured and confirms the actual schema: a top-level `symbols` object
 (schema_version/service/provider/timeframe/candle_source/
 synthetic_candles/generated_at/status/universe_size) and per-symbol
 metadata (symbol/market_state/status/last_candle_timestamp/candle_count/
-gap_recoveries/rejected_count) alongside each symbol's `candles` array.
-Every test below targets that confirmed shape; the disproven guessed
-shapes have been removed rather than kept "for compatibility" with an API
-that was never real.
+gap_recoveries/rejected_count) alongside each symbol's `candles_1m` array
+— the authoritative M1 candle array key, confirmed directly from the live
+endpoint (two earlier guesses, `candles` and then `candles_l1`, were both
+wrong). Every test below targets that confirmed shape; the disproven
+guessed shapes have been removed rather than kept "for compatibility"
+with an API that was never real.
 """
 
 import json
@@ -65,12 +67,14 @@ def test_all_ten_symbols_parse_correctly():
         assert result.symbol_meta[symbol].candle_count == len(candles)
 
 
-def test_all_ten_symbols_parse_via_hand_written_candles_l1_payload():
-    # Regression test for the exact reported mismatch: the live provider's
-    # per-symbol candle array key is "candles_l1", not "candles". This
-    # builds the payload by hand (bypassing tests/fixtures.py entirely) so
-    # it can never pass merely because the fixture happens to agree with
-    # the adapter — it independently proves entry["candles_l1"] is read.
+def test_all_ten_symbols_parse_via_hand_written_candles_1m_payload():
+    # Regression test for the exact CONFIRMED live field name: the live
+    # provider's per-symbol candle array key is "candles_1m". Two earlier
+    # guesses were both wrong ("candles", then "candles_l1") and have both
+    # been corrected. This builds the payload by hand (bypassing
+    # tests/fixtures.py entirely) so it can never pass merely because the
+    # fixture happens to agree with the adapter — it independently proves
+    # entry["candles_1m"] is read.
     names = [
         "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
         "USDCHF", "NZDUSD", "XAUUSD", "XAGUSD", "USOIL",
@@ -88,7 +92,7 @@ def test_all_ten_symbols_parse_via_hand_written_candles_l1_payload():
             "reconnect_count": 0,
             "gap_recoveries": 0,
             "rejected_count": 0,
-            "candles_l1": [
+            "candles_1m": [
                 {
                     "timestamp": BASE_TS + j * 60,
                     "open": base + j * 0.01,
@@ -129,54 +133,72 @@ def test_all_ten_symbols_parse_via_hand_written_candles_l1_payload():
         assert len(result.instruments[name]) == 3
 
 
-def test_candles_l1_array_is_accepted_and_candles_key_alone_is_not():
-    # Direct regression proof, both directions: a symbol with ONLY
-    # "candles_l1" parses fine (requirement: read candles_l1); a symbol
-    # with ONLY the old "candles" key (no "candles_l1" at all) must be
-    # rejected by name rather than silently treated as having data — the
-    # adapter must never fall back to "candles".
-    def _block(candle_key: str) -> dict:
-        return {
-            "symbol": "XAUUSD",
-            "market_state": "open",
-            "status": "ok",
-            "last_candle_timestamp": BASE_TS,
-            "gap_recoveries": 0,
-            "rejected_count": 0,
-            candle_key: [
-                {
-                    "timestamp": BASE_TS,
-                    "open": 2400.0,
-                    "high": 2401.0,
-                    "low": 2399.0,
-                    "close": 2400.5,
-                    "volume": 5.0,
-                    "bid": None,
-                    "ask": None,
-                }
-            ],
-        }
-
-    def _payload(candle_key: str) -> str:
-        return json.dumps(
+def _block_with_candle_key(candle_key: str) -> dict:
+    return {
+        "symbol": "XAUUSD",
+        "market_state": "open",
+        "status": "ok",
+        "last_candle_timestamp": BASE_TS,
+        "updated_at": BASE_TS,
+        "websocket_connected": True,
+        "reconnect_count": 0,
+        "gap_recoveries": 0,
+        "rejected_count": 0,
+        candle_key: [
             {
-                "schema_version": "1.0", "service": "psygrid-forex", "provider": "realmarketapi",
-                "timeframe": "M1", "candle_source": "provider_native", "synthetic_candles": False,
-                "generated_at": BASE_TS, "status": "ok", "universe_size": 1,
-                "symbols": {"XAUUSD": _block(candle_key)},
+                "timestamp": BASE_TS,
+                "open": 2400.0,
+                "high": 2401.0,
+                "low": 2399.0,
+                "close": 2400.5,
+                "volume": 5.0,
+                "bid": None,
+                "ask": None,
             }
-        )
+        ],
+        "m1_valid": True,
+    }
 
-    accepted = parse_payload(_payload("candles_l1"))
-    assert accepted.ok
-    assert "XAUUSD" in accepted.instruments
-    assert len(accepted.instruments["XAUUSD"]) == 1
 
-    rejected = parse_payload(_payload("candles"))  # old, wrong key only
-    assert not rejected.ok
-    assert "XAUUSD" not in rejected.instruments
-    assert "XAUUSD" in rejected.rejected_symbols
-    assert "candles_l1" in rejected.rejected_symbols["XAUUSD"]
+def _payload_with_candle_key(candle_key: str) -> str:
+    return json.dumps(
+        {
+            "schema_version": "1.0", "service": "psygrid-forex", "provider": "realmarketapi",
+            "timeframe": "M1", "candle_source": "provider_native", "synthetic_candles": False,
+            "generated_at": BASE_TS, "status": "ok", "universe_size": 1,
+            "symbols": {"XAUUSD": _block_with_candle_key(candle_key)},
+        }
+    )
+
+
+def test_candles_1m_array_is_accepted():
+    result = parse_payload(_payload_with_candle_key("candles_1m"))
+    assert result.ok
+    assert "XAUUSD" in result.instruments
+    assert len(result.instruments["XAUUSD"]) == 1
+    assert result.rejected_symbols == {}
+
+
+def test_candles_l1_key_alone_is_not_required_and_is_rejected():
+    # "candles_l1" was an earlier, incorrect guess at the field name — a
+    # symbol carrying ONLY that key (no "candles_1m" at all) must be
+    # rejected by name, not silently accepted as if it were the real key.
+    result = parse_payload(_payload_with_candle_key("candles_l1"))
+    assert not result.ok
+    assert "XAUUSD" not in result.instruments
+    assert "XAUUSD" in result.rejected_symbols
+    assert "candles_1m" in result.rejected_symbols["XAUUSD"]
+
+
+def test_candles_key_alone_is_not_required_and_is_rejected():
+    # "candles" was the original, also-incorrect guess — same treatment:
+    # a symbol carrying ONLY "candles" (no "candles_1m") is rejected by
+    # name rather than silently treated as having data.
+    result = parse_payload(_payload_with_candle_key("candles"))
+    assert not result.ok
+    assert "XAUUSD" not in result.instruments
+    assert "XAUUSD" in result.rejected_symbols
+    assert "candles_1m" in result.rejected_symbols["XAUUSD"]
 
 
 def test_timestamp_open_high_low_close_volume_mapped_correctly():
@@ -200,7 +222,7 @@ def test_timestamp_open_high_low_close_volume_mapped_correctly():
                     "candle_count": 1,
                     "gap_recoveries": 0,
                     "rejected_count": 0,
-                    "candles_l1": [
+                    "candles_1m": [
                         {
                             "timestamp": BASE_TS,
                             "open": 2400.1,
@@ -328,7 +350,7 @@ def test_bid_ask_are_never_read_onto_candle():
                     "candle_count": 1,
                     "gap_recoveries": 0,
                     "rejected_count": 0,
-                    "candles_l1": [
+                    "candles_1m": [
                         {
                             "timestamp": BASE_TS,
                             "open": 100.0,
@@ -369,7 +391,7 @@ def test_missing_ohlc_field_in_one_candle_is_dropped_not_fabricated():
                     "symbol": "USDJPY", "market_state": "open", "status": "ok",
                     "last_candle_timestamp": BASE_TS + 60, "candle_count": 2,
                     "gap_recoveries": 0, "rejected_count": 0,
-                    "candles_l1": [
+                    "candles_1m": [
                         {"timestamp": BASE_TS, "open": 150.0, "high": 150.2, "low": 149.8, "volume": 1.0},  # no close
                         {"timestamp": BASE_TS + 60, "open": 150.1, "high": 150.3, "low": 149.9, "close": 150.2, "volume": 1.0},
                     ],
@@ -383,23 +405,23 @@ def test_missing_ohlc_field_in_one_candle_is_dropped_not_fabricated():
     assert "USDJPY" not in result.rejected_symbols  # still usable overall
 
 
-def test_symbol_with_no_candles_key_is_rejected_by_name_not_silently_dropped():
+def test_symbol_with_no_candles_1m_key_is_rejected_by_name_not_silently_dropped():
     raw = live_payload_json(
         {"XAUUSD": make_m1_series("XAUUSD", [100.0, 100.1]), "EURUSD": make_m1_series("EURUSD", [1.1, 1.11])},
-        extra_symbol_overrides={"EURUSD": {"candles_l1": None}},
+        extra_symbol_overrides={"EURUSD": {"candles_1m": None}},
     )
     result = parse_payload(raw)
     assert result.ok  # XAUUSD alone is enough for ok=True
     assert "XAUUSD" in result.instruments
     assert "EURUSD" not in result.instruments
     assert "EURUSD" in result.rejected_symbols
-    assert "candles" in result.rejected_symbols["EURUSD"]
+    assert "candles_1m" in result.rejected_symbols["EURUSD"]
 
 
 def test_symbol_with_empty_candles_array_is_rejected_by_name():
     raw = live_payload_json(
         {"XAUUSD": make_m1_series("XAUUSD", [100.0, 100.1]), "EURUSD": make_m1_series("EURUSD", [1.1, 1.11])},
-        extra_symbol_overrides={"EURUSD": {"candles_l1": []}},
+        extra_symbol_overrides={"EURUSD": {"candles_1m": []}},
     )
     result = parse_payload(raw)
     assert "EURUSD" not in result.instruments
@@ -411,7 +433,7 @@ def test_symbol_whose_candles_are_all_malformed_is_rejected_by_name():
     raw = live_payload_json(
         {"XAUUSD": make_m1_series("XAUUSD", [100.0, 100.1])},
         extra_symbol_overrides={
-            "XAUUSD": {"candles_l1": [{"timestamp": BASE_TS, "open": 100.0}]}  # missing high/low/close
+            "XAUUSD": {"candles_1m": [{"timestamp": BASE_TS, "open": 100.0}]}  # missing high/low/close
         },
     )
     result = parse_payload(raw)
@@ -509,7 +531,7 @@ def test_universe_size_field_inconsistent_with_actual_symbol_count_is_reported()
 def test_rejected_symbols_are_named_exactly_in_coverage_issues():
     raw = live_payload_json(
         {"XAUUSD": make_m1_series("XAUUSD", [100.0, 100.1]), "EURUSD": make_m1_series("EURUSD", [1.1, 1.11])},
-        extra_symbol_overrides={"EURUSD": {"candles_l1": []}},
+        extra_symbol_overrides={"EURUSD": {"candles_1m": []}},
     )
     result = parse_payload(raw)
     assert any("EURUSD" in issue for issue in result.coverage_issues)
@@ -549,7 +571,7 @@ def test_provider_indicator_fields_are_parsed_out_and_never_stored():
         {"XAUUSD": make_m1_series("XAUUSD", [100.0, 100.1])},
         extra_symbol_overrides={
             "XAUUSD": {
-                "candles_l1": [
+                "candles_1m": [
                     {
                         "timestamp": BASE_TS,
                         "open": 2400.0,

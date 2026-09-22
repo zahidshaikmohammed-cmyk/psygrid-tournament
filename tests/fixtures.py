@@ -118,8 +118,9 @@ def live_symbol_block(candles: List[Candle], market_state: str = "open", status:
     RealMarketAPI schema exactly (including bid/ask, always null — the
     OHLCV-only strategy never reads them).
 
-    The authoritative M1 candle array is at "candles_l1" — NOT "candles",
-    which does not exist in the real payload.
+    The authoritative M1 candle array is at "candles_1m" — CONFIRMED from
+    the live endpoint. Neither "candles" nor "candles_l1" (an earlier,
+    incorrect guess) exists in the real payload.
     """
     return {
         "symbol": candles[0].instrument if candles else "",
@@ -129,7 +130,7 @@ def live_symbol_block(candles: List[Candle], market_state: str = "open", status:
         "candle_count": len(candles),
         "gap_recoveries": 0,
         "rejected_count": 0,
-        "candles_l1": [
+        "candles_1m": [
             {
                 "timestamp": c.ts,
                 "open": c.open,

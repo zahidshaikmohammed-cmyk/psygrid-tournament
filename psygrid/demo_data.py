@@ -141,7 +141,7 @@ class DemoFeedGenerator:
                     "candle_count": len(self._history[sym]),
                     "gap_recoveries": 0,
                     "rejected_count": 0,
-                    "candles_l1": self._history[sym],
+                    "candles_1m": self._history[sym],
                 }
                 for sym in INSTRUMENTS
             },
